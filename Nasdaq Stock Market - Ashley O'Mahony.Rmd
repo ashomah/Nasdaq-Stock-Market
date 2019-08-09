@@ -1,0 +1,350 @@
+---
+title: "Nasdaq Stock Market"
+author: "Ashley O'Mahony | [ashleyomahony.com](http://ashleyomahony.com) | December 2018"
+always_allow_html: yes
+output:
+  github_document: default
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+  html_document:
+    theme: yeti
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load and Install Packages, echo = FALSE, include = FALSE}
+packages_list <- c('readxl',
+                   'tidyr',
+                   'BatchGetSymbols',
+                   'data.table',
+                   'ggplot2',
+                   'gridExtra',
+                   'factoextra',
+                   'ggrepel',
+                   'knitr'
+                   )
+
+for (i in packages_list){
+  if(!i%in%installed.packages()){
+    install.packages(i, dependencies = TRUE)
+    library(i, character.only = TRUE)
+    print(paste0(i, ' has been installed'))
+  } else {
+    print(paste0(i, ' is already installed'))
+    library(i, character.only = TRUE)
+  }
+}
+```
+
+<br><br>
+
+***
+#####   _**Notes**_
+*This report can be generated using the theme `cayman` from the package `prettydoc`. If the package is not installed on your machine, it is recommended to use the default RMarkdown `html_document` theme `yeti`.*
+
+*The report also requires `r length(packages_list)` packages which will be installed automatically if not already present on your machine: ``r paste(packages_list, sep = ', ')``.*
+
+<br><br>
+
+***
+
+``` {r Load List of Nasdaq Stocks, echo = FALSE}
+nasdaq_stock_list <- read_excel('data_input/nasdaq_symbols.xlsx')
+```
+
+``` {r Download Settings, echo = FALSE, include = FALSE}
+years <- 20
+first_date <- Sys.Date() - as.integer(365*years)
+last_date <- Sys.Date()
+freq_data <- 'daily'
+thresh.bad.data <- 0
+```
+
+## Objective  
+
+This analysis aims to understand the relationship between `r nrow(nasdaq_stock_list)` Nasdaq stocks, considering their average daily return and volatility.
+
+``` {r Download Data Nasdaq Stocks, echo = FALSE, include = FALSE}
+
+# Load Nasdaq Stock Market List
+nasdaq_stock_list <- read_excel('data_input/nasdaq_symbols.xlsx')
+str(nasdaq_stock_list)
+
+# Download and Format Stock Market Data
+dl_stock_data <- BatchGetSymbols(tickers = nasdaq_stock_list$Symbol,
+                                 first.date = first_date,
+                                 last.date = last_date,
+                                 freq.data = freq_data,
+                                 thresh.bad.data = thresh.bad.data)
+
+# Summarize the missing data
+dl_warnings <- dl_stock_data$df.control[dl_stock_data$df.control$perc.benchmark.dates != 1, c('ticker', 'perc.benchmark.dates')]
+dl_warnings <- merge(dl_warnings, nasdaq_stock_list, by.x = 'ticker', by.y = 'Symbol')
+names(dl_warnings)[names(dl_warnings) == 'ticker'] <- 'Stock Code'
+names(dl_warnings)[names(dl_warnings) == 'Name'] <- 'Stock Name'
+names(dl_warnings)[names(dl_warnings) == 'perc.benchmark.dates'] <- 'Data %'
+dl_warnings$`Stock Code` <- as.factor(dl_warnings$`Stock Code`)
+dl_warnings$`Data %` <- paste(as.integer(dl_warnings$`Data %`*100),'%')
+dl_warnings <- dl_warnings[, c('Stock Code', 'Stock Name', 'Data %')]
+```
+
+The data is downloaded from [Yahoo! Finance](https://finance.yahoo.com), for the past `r years` years starting from `r format(first_date, '%d %B %Y')`. 
+
+<br><br>
+
+***
+
+## Data Download
+
+The data is downloaded using the method `BatchGetSymbols` from the package `BatchGetSymbols`. The resulting dataframe contains stock market figures per day for each of the `r nrow(nasdaq_stock_list)` stocks.
+
+```{r Query, eval = FALSE}
+dl_stock_data <- BatchGetSymbols(tickers = nasdaq_stock_list$Symbol,
+                                 first.date = first_date,
+                                 last.date = last_date,
+                                 freq.data = freq_data,
+                                 thresh.bad.data = thresh.bad.data)
+```
+
+```{r Download Sample, echo = FALSE, include = TRUE}
+head(dl_stock_data$df.tickers)
+```
+
+<br><br>
+Note that among the `r nrow(nasdaq_stock_list)` Nasdaq stocks, `r paste(round(nrow(dl_warnings)/nrow(nasdaq_stock_list)*100,2),'%')` didn't have complete information on the selected period. The table below lists the concerned stocks and the percentage of available data. However, the missing data shouldn't be impacting our analysis, as we will consider the average values on the period.
+
+``` {r Download Warning, echo = FALSE, include = TRUE}
+dl_warnings
+```
+
+
+<br><br>
+
+***
+
+## Data Preparation
+
+For this analysis, we use the *Closing Price* (`price.close`) which is the last price of the stock at the market closure. We calculate the difference compared to the *Closing Price* of the previous day, and compute it to a change ratio:
+
+$$\frac{ClosingPriceD1-ClosingPriceD0}{ClosingPriceD0}$$
+
+<br><br>
+The resulting dataframe looks like this:
+
+``` {r Data Preparation, echo = FALSE, include = TRUE}
+# Extract and prepare the stock data
+stock_data <- merge(dl_stock_data$df.tickers, nasdaq_stock_list, by.x = 'ticker', by.y = 'Symbol')
+names(stock_data)[names(stock_data) == 'ticker'] <- 'stock_code'
+names(stock_data)[names(stock_data) == 'Name'] <- 'stock_name'
+stock_data$stock_code <- as.factor(stock_data$stock_code)
+stock_data <- as.data.table(stock_data)
+setkey(stock_data, stock_code, ref.date)
+
+# Calculate the price variation from consecutive dates
+stock_data[, daily_diff := price.close - shift(price.close), by = list(stock_code)]
+stock_data[, daily_return := daily_diff/shift(price.close, type='lag'), by = list(stock_code)]
+stock_data[,c('stock_code', 'ref.date', 'price.close', 'daily_diff', 'daily_return')]
+```
+
+<br><br>
+
+We then aggregate the values to calculate the *Average Daily Return* and the *Volatility* (i.e. standard deviation) for each stock:
+
+``` {r Statistics, echo = FALSE, include = TRUE}
+# Create Average Daily Return and Volatility Table
+stock_return_stats <- aggregate(daily_return ~ stock_code,
+                                data = stock_data,
+                                FUN = mean,
+                                na.rm = TRUE)
+stock_return_stats <- merge(stock_return_stats,
+                            aggregate(daily_return ~ stock_code,
+                                      data = stock_data,
+                                      FUN = sd,
+                                      na.rm = TRUE),
+                            by.x = 'stock_code',
+                            by.y = 'stock_code')
+stock_return_stats <- merge(stock_return_stats,
+                            nasdaq_stock_list,
+                            by.x = 'stock_code',
+                            by.y = 'Symbol')
+names(stock_return_stats)[names(stock_return_stats) == 'daily_return.x'] <- 'daily_return_mean'
+names(stock_return_stats)[names(stock_return_stats) == 'daily_return.y'] <- 'daily_return_sd'
+names(stock_return_stats)[names(stock_return_stats) == 'Name'] <- 'stock_name'
+rownames(stock_return_stats) <- stock_return_stats$stock_code
+
+stock_return_stats <- stock_return_stats[,c('stock_code', 'stock_name', 'daily_return_mean', 'daily_return_sd')]
+stock_return_stats <- merge(stock_return_stats, dl_stock_data$df.control[,c('ticker','perc.benchmark.dates')], by.x = 'stock_code', by.y = 'ticker')
+names(stock_return_stats)[names(stock_return_stats) == 'perc.benchmark.dates'] <- 'Data %'
+stock_return_stats$`Data %` <- paste(as.integer(stock_return_stats$`Data %`*100),'%')
+```
+
+``` {r Sample Stats, echo = FALSE, include = TRUE}
+as.data.table(stock_return_stats)
+```
+
+
+
+<br><br>
+
+This last table will be the basis for our cluster analysis. We can visualize the information as below:
+
+``` {r Plot without Cluster, echo = FALSE, include = TRUE, fig.align = 'center'}
+ggplot(data = stock_return_stats[,c('daily_return_mean', 'daily_return_sd')], aes(x = daily_return_mean, y = daily_return_sd, label = stock_return_stats$stock_code, colour = 'red'))+
+  geom_point(size = 1)+
+  # geom_text_repel(size = 2, segment.color = 'grey', segment.size = 0.2)+
+  labs(x = 'Average Daily Return', y = 'Volatility', title = 'Nasdaq Stock Market')+
+  theme(legend.position='bottom')+
+  theme_light()
+```
+
+<br><br>
+
+***
+
+## Cluster Analysis: K-Means
+
+The selected algotrithm for this analysis is the *K-Means*, which is a fast method to group similar cases. We will perform several analysis, with different *k* values to identify a good solution.
+
+``` {r Clustering, echo = TRUE, include = TRUE}
+# Run K-means algorithms with different k values
+set.seed(1410)
+k2 <- kmeans(stock_return_stats[,c('daily_return_mean','daily_return_sd')],centers = 2, nstart = 25)
+k3 <- kmeans(stock_return_stats[,c('daily_return_mean','daily_return_sd')], centers = 3, nstart = 25)
+k4 <- kmeans(stock_return_stats[,c('daily_return_mean','daily_return_sd')], centers = 4, nstart = 25)
+k5 <- kmeans(stock_return_stats[,c('daily_return_mean','daily_return_sd')], centers = 5, nstart = 25)
+k6 <- kmeans(stock_return_stats[,c('daily_return_mean','daily_return_sd')], centers = 6, nstart = 25)
+k7 <- kmeans(stock_return_stats[,c('daily_return_mean','daily_return_sd')], centers = 7, nstart = 25)
+
+# Add cluster values in dataset
+stock_return_stats$cluster_k2 <- as.factor(k2$cluster)
+stock_return_stats$cluster_k3 <- as.factor(k3$cluster)
+stock_return_stats$cluster_k4 <- as.factor(k4$cluster)
+stock_return_stats$cluster_k5 <- as.factor(k5$cluster)
+stock_return_stats$cluster_k6 <- as.factor(k6$cluster)
+stock_return_stats$cluster_k7 <- as.factor(k7$cluster)
+```
+
+``` {r Cluster Plots, echo = FALSE, include = TRUE, fig.height=15, fig.width=15, fig.align = 'center'}
+# K-means plots
+p2 <- fviz_cluster(k2, geom = 'point', data = stock_return_stats[,c('daily_return_mean','daily_return_sd')]) + ggtitle('k = 2')+
+  labs(x = 'Average Daily Return', y = 'Volatility') + theme_minimal()
+p3 <- fviz_cluster(k3, geom = 'point', data = stock_return_stats[,c('daily_return_mean','daily_return_sd')]) + ggtitle('k = 3')+
+  labs(x = 'Average Daily Return', y = 'Volatility') + theme_minimal()
+p4 <- fviz_cluster(k4, geom = 'point', data = stock_return_stats[,c('daily_return_mean','daily_return_sd')]) + ggtitle('k = 4')+
+  labs(x = 'Average Daily Return', y = 'Volatility') + theme_minimal()
+p5 <- fviz_cluster(k5, geom = 'point', data = stock_return_stats[,c('daily_return_mean','daily_return_sd')]) + ggtitle('k = 5')+
+  labs(x = 'Average Daily Return', y = 'Volatility') + theme_minimal()
+p6 <- fviz_cluster(k6, geom = 'point', data = stock_return_stats[,c('daily_return_mean','daily_return_sd')]) + ggtitle('k = 6')+
+  labs(x = 'Average Daily Return', y = 'Volatility') + theme_minimal()
+p7 <- fviz_cluster(k7, geom = 'point', data = stock_return_stats[,c('daily_return_mean','daily_return_sd')]) + ggtitle('k = 7')+
+  labs(x = 'Average Daily Return', y = 'Volatility') + theme_minimal()
+
+k_mean_plots <- list()
+
+k_mean_plots[[1]] <- p2
+k_mean_plots[[2]] <- p3
+k_mean_plots[[3]] <- p4
+k_mean_plots[[4]] <- p5
+k_mean_plots[[5]] <- p6
+k_mean_plots[[6]] <- p7
+
+grid.arrange(grobs = k_mean_plots, ncol=2, nrow=3)
+```
+
+<br><br>
+
+***
+
+## Analysis
+
+From these charts and the number of cases per cluster shown in the table below, we can already eliminate k=2, k=6 and k=7:
+* k=2 generates clusters which seem too large,
+* k=6 and k=7 generates clusters with only a few cases.
+
+|k = 2      |k = 3      |k = 4      |k = 5      |k = 6      |k = 7      |
+|:---------:|:---------:|:---------:|:---------:|:---------:|:---------:|
+|`r k2$size`|`r k3$size`|`r k4$size`|`r k5$size`|`r k6$size`|`r k7$size`|
+
+<br><br>
+
+The choice between k=3, k=4 and k=5 is a bit harder, but we would select k=5 as it shows clusters with more balanced numbers of cases. The detailled results of the K-Mean algorithm with k=5 are:
+
+``` {r Results k5, echo = FALSE, include = TRUE}
+k5
+```
+
+``` {r Plot K5, echo = FALSE, include = TRUE, fig.height=8, fig.width=12, fig.align = 'center'}
+to_plot <- as.data.frame(stock_return_stats[,c('daily_return_mean','daily_return_sd')])
+rownames(to_plot) <- stock_return_stats$stock_code
+fviz_cluster(k5, geom = 'point', data = to_plot[,c('daily_return_mean','daily_return_sd')], labelsize = 2) + ggtitle('k = 5')+
+               labs(x = 'Average Daily Return', y = 'Volatility', size = 0.) + theme_minimal()+ geom_text_repel(segment.size = 0.3)+ aes(label = rownames(to_plot))+ theme()
+```
+
+<br><br>
+
+Looking at the clusters in more details, we can see which companies are grouped together by the algorithm:
+
+``` {r Table, echo = FALSE, include = TRUE}
+cbind.fill <- function(...){
+    nm <- list(...) 
+    nm <- lapply(nm, as.matrix)
+    n <- max(sapply(nm, nrow)) 
+    do.call(cbind, lapply(nm, function (x) 
+        rbind(x, matrix(, n-nrow(x), ncol(x))))) 
+}
+
+list_companies <- cbind.fill(stock_return_stats[stock_return_stats$cluster_k5 == 1, 'stock_name'],stock_return_stats[stock_return_stats$cluster_k5 == 2, 'stock_name'],stock_return_stats[stock_return_stats$cluster_k5 == 3, 'stock_name'],stock_return_stats[stock_return_stats$cluster_k5 == 4, 'stock_name'],stock_return_stats[stock_return_stats$cluster_k5 == 5, 'stock_name'])
+list_companies[is.na(list_companies)] <- ''
+
+kable(list_companies, col.names = c('Cluster 1', 'Cluster 2', 'Cluster 3', 'Cluster 4', 'Cluster 5'), align = 'c')
+```
+
+<br><br>
+
+The boxplot below shows how the clusters have been designed considering the *Average Daily Return* and *Volatility* values of each case:
+
+``` {r BoxPlot, echo = FALSE, include = TRUE, fig.height=8, fig.width=12, fig.align = 'center'}
+box_plots <- list()
+box_plots[[1]] <- ggplot(stock_return_stats[, c('daily_return_mean', 'cluster_k5')], aes(x = cluster_k5, y = daily_return_mean, colour = cluster_k5))+ geom_boxplot()+ labs(x = 'Clusters', y = 'Average Daily Return')+ theme_minimal()+ theme(legend.position = 'none')
+box_plots[[2]] <- ggplot(stock_return_stats[, c('daily_return_sd', 'cluster_k5')], aes(x = cluster_k5, y = daily_return_sd, colour = cluster_k5))+ geom_boxplot()+ labs(x = 'Clusters', y = 'Volatility')+ theme_minimal()
+grid.arrange(grobs = box_plots, ncol=2, nrow=1)
+```
+
+<br><br>
+
+The *Volatily* seems to hav been the clear differentiator of the groups, while the *Average Daily Return* can be overlapping for several groups. However, it is possible to describe each cluster based on these parameters:
+
+| Parameter | Cluster 1 | Cluster 2 | Cluster 3 | Cluster 4 | Cluster 5 |
+|:---------:|:---------:|:---------:|:---------:|:---------:|:---------:|
+|Av. Daily Return|High|High|Low/Negative|Low|Low|
+|Volatility|High|Very High|Low|Medium|Medium|
+
+<br><br>
+
+## Conclusions
+
+This cluster analysis can help investors to identify in which companies they should invest for their long-term investments, based on their profile and risk aversion.
+
+The **clusters `1` and `2`** have **high _Average Daily Returns_** but also **high _Volatilities_**. Individuals willing to invest in these companies should be will to take higher risk and accept to see their capital decrease and increase quickly. It is particularly true for the companies in Cluster `2`, like *Western Digital*, as they have a higher *Volatility* but don't seem to provide the corresponding effect in returns.
+
+The **clusters `4` and `5`**, in comparison, have **low _Average Daily Returns_** but **medium _Volatilities_**. These companies would be perfect fits for wiser profiles. People liking risk slightly more could invest in companies of cluster `4`, like *Apple*, in order to get **higher returns**. 
+
+The **cluster `3`** seems to list the companies to avoid. These are very stable with **very low _Volatilities_**, but their **_Average Daily Return_ is also very low**, and even sometimes **negative**, like **_Verisk Analytics_!** 
+
+Overall, **the clusters `2` and `4` seem to be the most attractive**, as they offer a fairly good balance between risk and return.
+
+<br><br>
+
+
+
+
+
+
+
+
+
+
+
