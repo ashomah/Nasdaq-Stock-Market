@@ -1,3 +1,4 @@
+*.* linguist-language=R
 * text=auto
 *.html linguist-detectable=false
 *.gitattributes text
